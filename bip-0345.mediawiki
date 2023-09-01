@@ -18,7 +18,7 @@
 == Introduction ==
 
 This BIP proposes two new tapscript opcodes that add consensus support for a specialized
-covenant: <code>OP_VAULT</code> and <code>OP_VAULT_RECOVER</code>. These opcodes, in conjunction with
+covenant: <code>OP_VAULT</code>, <code>OP_REVAULT</code>, and <code>OP_VAULT_RECOVER</code>. These opcodes, in conjunction with
 <code>OP_CHECKTEMPLATEVERIFY</code>
 ([https://github.com/bitcoin/bips/blob/master/bip-0119.mediawiki BIP-0119]),
 allow users to enforce a delay period before designated coins may be spent to
@@ -222,7 +222,7 @@ management mechanisms.
 The tapscript opcodes <code>OP_SUCCESS187</code> (<code>0xbb</code>) and
 <code>OP_SUCCESS188</code> (<code>0xbc</code>) are constrained with new rules
 to implement <code>OP_VAULT</code> and <code>OP_VAULT_RECOVER</code>,
-respectively.
+respectively. FIXME pick <code>OP_REVAULT</code>
 
 === <code>OP_VAULT</code> evaluation ===
 
@@ -233,9 +233,8 @@ When evaluating <code>OP_VAULT</code> (<code>OP_SUCCESS187</code>,
 <leaf-update-script-body>
 <n-pushes>
 [ n leaf-update script data items ... ]
+<trigger-amount>
 <trigger-vout-idx> 
-<revault-vout-idx>
-<revault-amount>
 </source>
 
 where
@@ -254,7 +253,33 @@ where
 ** If this value does not decode to a valid CScriptNum, script execution when spending this output MUST fail and terminate immediately.
 ** If this value is less than 0 or is greater than or equal to the number of outputs, script execution when spending this output MUST fail and terminate immediately.
 
-* <code><revault-vout-idx></code> is an up to 4-byte CScriptNum-encoded number optionally indicating the index of an output which, in conjunction with the trigger output, carries forward the value of this input, and has an identical scriptPubKey to the current input.
+* <code><trigger-amount></code> is an up to 7-byte CScriptNum-encoded number indicating the number of satoshis being unvaulted.
+** If this value does not decode to a valid CScriptNum, script execution when spending this output MUST fail and terminate immediately.
+** If this value is not greater than or equal to 0, script execution when spending this output MUST fail and terminate immediately.
+
+After the stack is parsed, the following validation checks are performed:
+
+* Let the output designated by <code><trigger-vout-idx></code> be called ''triggerOut''.
+* If <code><trigger-amount></code> is non-zero the scriptPubKey of ''triggerOut'' is not a witness program of the same version and same tapleaf version as the currently executing script, script execution MUST fail and terminate immediately.
+* Let the script constructed by taking the <code><leaf-update-script-body></code> and prefixing it with minimally-encoded data pushes of the <code><n-pushes></code> leaf-update script data items be called the ''leaf-update-script''.
+** Note: the leaf-update data items will be in the same order in the ''leaf-update-script'' as they appeared on the stack.
+* If the scriptPubKey of ''triggerOut'' does not match that of a taptree that is identical to that of the currently evaluated input, but with the leaf script substituted for ''leaf-update-script'', script execution when spending this output MUST fail and terminate immediately.
+** Note: the parity bit of the resulting taproot output is allowed to vary, so both values for the new output must be checked.
+** Amount checks are ultimately done with deferred checks, but this check can help short-circuit obviously invalid spends.
+* Queue a deferred check<ref>'''What is a deferred check and why does this proposal require them for correct script evaluation?''' A deferred check is a validation check that is executed only after all input scripts have been validated, and is based on aggregate information collected during each input's EvalScript run.<br /><br />Currently, the validity of each input is (usually) checked concurrently across all inputs in a transaction. Because this proposal allows batching the spend of multiple vault inputs into a single recovery or withdrawal output, we need a mechanism to ensure that all expected values per output can be summed and then checked. This necessitates the introduction of an "aggregating" set of checks which can only be executed after each input's script is evaluated. Note that similar functionality would be required for batch input validation or cross-input signature aggregation.</ref> that ensures the satoshis for this input's <code>nValue</code> minus <code><revault-amount></code> are included within the output <code>nValue</code> found at <code><trigger-vout-idx></code>.
+
+If none of the conditions fail, the minimally-encoded difference between input satoshi value and <code>trigger-amount</code>, here-after known as <code>residual</code> is left on the stack. Typically this residual will be fed directly into <code>OP_REVAULT</code> or constrained in some way to avoid funds being exfiltrated trivially from the smart contract. Note that this doesn't preclude pushing a negative number onto the stack, as <code>trigger-amount</code> can be larger than input value potentially.
+
+=== <code>OP_REVAULT</code> evaluation ===
+
+<source>
+<revault-amount>
+<revault-vout-idx>
+</source>
+
+where
+
+* <code><revault-vout-idx></code> is an up to 4-byte CScriptNum-encoded number indicating the index of an output which, in conjunction with the trigger output, carries forward the value of this input, and has an identical scriptPubKey to the current input.
 ** If this value does not decode to a valid CScriptNum, script execution when spending this output MUST fail and terminate immediately.
 ** If this value is greater than or equal to the number of outputs, script execution when spending this output MUST fail and terminate immediately.
 ** If this value is negative and not equal to -1, script execution when spending this output MUST fail and terminate immediately.<ref>'''Why is -1 the only allowable negative value for revault-vout-idx?''' A negative revault index indicates that no revault output exists; if this value were allowed to be any negative number, the witness could be malleated (and bloated) while a transaction is waiting for confirmation.</ref>
@@ -264,19 +289,10 @@ where
 ** If this value is not greater than or equal to 0, script execution when spending this output MUST fail and terminate immediately.
 ** If this value is non-zero but <code><revault-vout-idx></code> is negative, script execution when spending this output MUST fail and terminate immediately.
 
-After the stack is parsed, the following validation checks are performed:
-
-* Let the output designated by <code><trigger-vout-idx></code> be called ''triggerOut''.
-* If the scriptPubKey of ''triggerOut'' is not a witness program of the same version and same tapleaf version as the currently executing script, script execution MUST fail and terminate immediately.
-* Let the script constructed by taking the <code><leaf-update-script-body></code> and prefixing it with minimally-encoded data pushes of the <code><n-pushes></code> leaf-update script data items be called the ''leaf-update-script''.
-** Note: the leaf-update data items will be in the same order in the ''leaf-update-script'' as they appeared on the stack.
-* If the scriptPubKey of ''triggerOut'' does not match that of a taptree that is identical to that of the currently evaluated input, but with the leaf script substituted for ''leaf-update-script'', script execution when spending this output MUST fail and terminate immediately.
-** Note: the parity bit of the resulting taproot output is allowed to vary, so both values for the new output must be checked.
 * Let the output designated by <code><revault-vout-idx></code> (if the index value is non-negative) be called ''revaultOut''.
-* If the scriptPubKey of ''revaultOut'' is not equal to the scriptPubKey of the input being spent, script execution when spending this output MUST fail and terminate immediately.
+* If <code><revault-amount></code> is non-zero and the scriptPubKey of ''revaultOut'' is not equal to the scriptPubKey of the input being spent, script execution when spending this output MUST fail and terminate immediately.
 * Implemetation recommendation: if the sum of the amounts of ''triggerOut'' and ''revaultOut'' (if any) are not greater than or equal to the value of this input, script execution when spending this output SHOULD fail and terminate immediately.
-** Amount checks are ultimately done with deferred checks, but this check can help short-circuit obviously invalid spends.
-* Queue a deferred check<ref>'''What is a deferred check and why does this proposal require them for correct script evaluation?''' A deferred check is a validation check that is executed only after all input scripts have been validated, and is based on aggregate information collected during each input's EvalScript run.<br /><br />Currently, the validity of each input is (usually) checked concurrently across all inputs in a transaction. Because this proposal allows batching the spend of multiple vault inputs into a single recovery or withdrawal output, we need a mechanism to ensure that all expected values per output can be summed and then checked. This necessitates the introduction of an "aggregating" set of checks which can only be executed after each input's script is evaluated. Note that similar functionality would be required for batch input validation or cross-input signature aggregation.</ref> that ensures the satoshis for this input's <code>nValue</code> minus <code><revault-amount></code> are included within the output <code>nValue</code> found at <code><trigger-vout-idx></code>.
+
 * Queue a deferred check that ensures <code><revault-amount></code> satoshis, if non-zero, are included within the output's <code>nValue</code> found at <code><revault-vout-idx></code>.
 ** These deferred checks could be characterized in terms of the pseudocode below (in ''Deferred checks'') as<br /><code>TriggerCheck(input_amount, <revault-amount>, <trigger-vout-idx>, <revault-vout-idx>)</code>.
 
@@ -320,11 +336,13 @@ The Python pseudocode for this is as follows:
 <source lang="python">
 class TriggerCheck:
     """Queued by evaluation of OP_VAULT (withdrawal trigger)."""
-    input_amount: int
-    revault_amount: int
+    trigger_amount: int
     trigger_vout_idx: int
-    revault_vout_idx: int
 
+class RevaultCheck:
+    """Queued by evaluation of OP_REVAULT."""
+    revault_amount: int
+    revault_vout_idx: int
 
 class RecoveryCheck:
     """Queued by evaluation of OP_VAULT_RECOVER."""
@@ -342,11 +360,9 @@ def validate_deferred_checks(checks: [DeferredCheck], tx: Transaction) -> bool:
 
     for c in checks:
         if isinstance(c, TriggerCheck):
-            out_map[c.trigger_vout_idx] += (c.input_amount - c.revault_amount)
-
-            if c.revault_amount > 0:
-                out_map[c.revault_vout_idx] += c.revault_amount
-
+            out_map[c.trigger_vout_idx] += c.trigger_amount
+        elif isinstance(c, RevaultCheck):
+            out_map[c.revault_vout_idx] += c.revault_amount
         elif isinstance(c, RecoveryCheck):
             out_map[c.vout_idx] += c.input_amount
 
@@ -412,8 +428,8 @@ tr(<internal-pubkey>,
       <recovery-sPK-hash> OP_VAULT_RECOVER,
 
     trigger: 
-      <trigger-auth-pubkey> OP_CHECKSIGVERIFY                     (i)
-      <spend-delay> 2 $leaf-update-script-body OP_VAULT,          (ii)
+      <trigger-auth-pubkey> OP_CHECKSIGVERIFY                       (i)
+      <spend-delay> 2 $leaf-update-script-body OP_VAULT OP_REVAULT, (ii)
 
     ... [ possibly other leaves ]
   }
@@ -423,7 +439,7 @@ where
 * <code>$leaf-update-script-body</code> is, for example, <code>OP_CHECKSEQUENCEVERIFY OP_DROP OP_CHECKTEMPLATEVERIFY</code>.
 ** This is one example of a trigger script, but ''any'' script fragment can be used, allowing the creation of different types of vaults. For example, you could use <code>OP_CHECKSEQUENCEVERIFY OP_DROP OP_CHECKSIG</code> to do a time-delayed transfer of the coins to another key. This also future-proofs <code>OP_VAULT</code> for future scripting capabilities.
 * The script fragment in <code>(i)</code> is called the "trigger authorization," because it gates triggering the withdrawal. This can be done in whatever manner the wallet designer would like.
-* The script fragment in <code>(ii)</code> is the incomplete <code>OP_VAULT</code> invocation - it will be completed once the rest of the parameters (the CTV target hash, trigger vout index, and revault vout index) are provided by the trigger transaction witness.
+* The script fragment in <code>(ii)</code> is the incomplete <code>OP_VAULT</code> invocation - it will be completed once the rest of the parameters (the CTV target hash, trigger vout index, and revault vout index) are provided by the trigger transaction witness. Note that we can replace <code>OP_REVAULT</code> with <code>OP_NOT</code> to assert the top of the stack is the emptry string to explicitly disallow partial unvaulting of utxos, if desired.
 
 Typically, the internal key for the vault taproot output will be specified so
 that it is controlled by the same descriptor as the recovery path, which
@@ -444,8 +460,8 @@ full leaf-update script (in this case, a timelocked CTV script):
 Witness stack:
 
 - <revault-amount>
-- <revault-vout-idx> (-1 if none)
-- <trigger-vout-idx>
+- <revault-vout-idx> (ignored if value 0)
+- <trigger-vout-idx> (ignored if value 0)
 - <target-CTV-hash>
 - <trigger-auth-pubkey-signature>
 - [ "trigger" leaf script contents ]
@@ -630,6 +646,88 @@ In the minimum-trust case, the user can supply a probabilistic filter of which
 coins they wish to monitor; the watchtower would then alert the user if any
 coins matching the filter move, and the user would be responsible for ignoring
 false positives and handling recovery initiation.
+
+=== Per-UTXO rate-limited unvaults ===
+
+By adding a relative timelock to the vaulted coins and asserting constraints
+on the <code>trigger-amount</code>, we can achieve rate-limited unvaults,
+constrained at the utxo level.
+
+Replacing only the `trigger` text from the above vault example:
+
+<source>
+  ...
+    trigger: 
+      <rate-limit-delay> OP_CSV OP_DROP <trigger-auth-pubkey> OP_CHECKSIGVERIFY                                           (i)
+      <spend-delay> 2 OP_DUP OP_1 OP_ADD OP_PICK <max-val> OP_LEQ OP_VERIFY $leaf-update-script-body OP_VAULT OP_REVAULT, (ii)
+  ...
+</source>
+
+(i) is prepended by a relative timelock which sets the "clock" for the rate-limiting in blocks
+(ii) grabs the <code>n-pushes</code> value which is `2`, adds one, grabs the value which corresponds to <code>trigger-amount</code>,
+then asserts constraints on that inspected value. Off-by-one-errors are my fault, but it should be understandable enough.
+
+Note that since this lock is **per-utxo** so more coin management will
+be necessary. Also do note that numeric operations such as <code>OP_LEQ</code> will
+only work up to 4-byte CScriptNum operands. Beyond this, we will need to introduce
+"whole denominations" in script beyond roughly ~2.1 BTC values.
+
+f.e., if a utxo is 106.001 BTC and we're rate-limiting to 50, the script could have a clause that lets
+50 BTC through without any math, and another clause that lets through 5 BTC, then another that lets
+up to 1 BTC and uses <code>OP_LEQ</code> as described, twice.
+
+=== Unvaulting collateral ===
+
+In the case where the recovery path remains secure, we can introduce fixed
+collateral amounts per utxo unvaulted. An attacker would risk getting this collateral
+swept from them, per utxo unvaulting attempt.
+
+Replacing only the `trigger` text from the first vault example:
+
+<source>
+  ...
+    trigger: 
+      <trigger-auth-pubkey> OP_CHECKSIGVERIFY                                     (i)
+      <spend-delay> 2 $leaf-update-script-body OP_VAULT OP_REVAULT
+        <collat-amount> OP_SWAP <spend-delay> 2 $leaf-update-script-body OP_VAULT (ii)
+  ...
+</source>
+
+where <code>collat-amount</code> is the amount of collateral desired per utxo unvaulting.
+
+(ii) This involves a bit of stack manipulation, but again, proof of concept. The idea
+is that the <code>collat-amount</code> can be swapped into place for the second `OP_VAULT` invocation.
+With fancier stack manipulation we can get rid the ''$leaf-update-script-body'' and other arg duplication
+in the witness stack.
+
+Something handwavy like: 
+
+<source>
+      <spend-delay> 2 $leaf-update-script-body OP_3DUP <pull up the trigger-amount and trigger-out-idx to right spots> OP_VAULT OP_REVAULT
+        <collat-amount> <stick collat amount in right spot> OP_VAULT (ii)
+</source>
+
+I'll rely on Bitcoin Script wizards for this one.
+
+=== Rate-limits + collateral ===
+
+Seems possible. Also I suppose collateral could be stuck in a single-key "unvault" of its own, then fed back in to the next unvaulting
+attempt the next time the vault output rather than require the collateral to take two hops out.
+
+<source>
+  ...
+    trigger: 
+      <rate-limit-delay> OP_CSV OP_DROP <trigger-auth-pubkey> OP_CHECKSIGVERIFY                                           (i)
+      <spend-delay> 2 OP_DUP OP_1 OP_ADD OP_PICK <max-val> OP_LEQ OP_VERIFY $leaf-update-script-body OP_VAULT OP_REVAULT
+        <collat-amount> OP_SWAP <spend-delay> 2 $leaf-update-script-body OP_VAULT, (ii)
+  ...
+</source>
+
+Now the only way to trigger an unvault is to:
+
+1. Age the utxo to <rate-limit-delay>
+1. Set first unvaulting value to <code><= <max-val></code>
+1. Add <code>collat-amount</code> more value from additional inputs to satisfy the balance checks
 
 === Output descriptors ===
 
